@@ -1,0 +1,23 @@
+version: '3.7'
+services:
+  redpanda:
+    image: docker.redpanda.com/vectorized/redpanda:latest
+    ports:
+      - 9092:9092
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --advertise-kafka-addr OUTSIDE://0.0.0.0:9092,INSIDE://redpanda:29092
+      - --kafka-addr OUTSIDE://0.0.0.0:9092,INSIDE://0.0.0.0:29092
+  console:
+    image: docker.redpanda.com/vectorized/console:latest
+    ports:
+      - 8080:8080
+    environment:
+      KAFKA_BROKERS: redpanda:29092
