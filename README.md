@@ -1,5 +1,7 @@
 # Stratus
 
+![Screenshot of Stratus](https://raw.githubusercontent.com/phroggyy/stratus/main/screenshot.png)
+
 Stratus is a command-line tool for publishing protobuf-based [cloudevents](https://cloudevents.io/)
 onto a Kafka (or Kafka-compatible, e.g Redpanda) topic.
 
