@@ -18,11 +18,13 @@ import (
 	"github.com/rivo/tview"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/anypb"
+	"gopkg.in/yaml.v3"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strconv"
+	"stratus/pkg/form"
 	"strings"
 )
 
@@ -193,10 +195,13 @@ func main() {
 
 	layout.AddItem(fileBrowser, 0, 0, 2, 1, 0, 0, true)
 	layout.AddItem(messageEditor, 0, 1, 2, 1, 0, 0, true)
+
 	updateFileBrowser(cwd, false)
 
 	app.SetRoot(root, true).Run()
 }
+
+var closestBufFile = ""
 
 func updateFileBrowser(dir string, relative bool) error {
 	if relative {
@@ -210,8 +215,64 @@ func updateFileBrowser(dir string, relative bool) error {
 	descriptors = map[string]*desc.MessageDescriptor{}
 	// if we're "inside" a proto file, we should render messages instead of directories
 	if filepath.Ext(currentDir) == ".proto" {
+		// if we have previously navigated past a `buf.yaml` file, we'll read that first and make all protos available
+		vendorDirectory := ""
+		if closestBufFile != "" {
+			logger.Debugw("parsing buf file", "file_path", closestBufFile)
+			// run `buf export` for each item in `buf.yaml`
+			dir, err := os.MkdirTemp(os.TempDir(), "buf-vendor-proto")
+			if err != nil {
+				panic(err)
+			}
+			vendorDirectory = dir
+
+			bufFile, err := os.Open(closestBufFile)
+			if err != nil {
+				panic(err)
+			}
+			d := yaml.NewDecoder(bufFile)
+
+			bufContents := map[string]interface{}{}
+			if err := d.Decode(&bufContents); err != nil {
+				panic(err)
+			}
+			logger.Debugw("parsed buf file", "contents", bufContents)
+
+			if deps, ok := bufContents["deps"].([]string); ok {
+				for _, dep := range deps {
+					exec.Command("buf", "export", dep, "-o", dir).Run()
+				}
+			} else {
+				logger.Debugw("no buf dependencies declared", "file", closestBufFile)
+			}
+		}
 		// read the file
-		p := protoparse.Parser{}
+		p := protoparse.Parser{
+			Accessor: func(filename string) (io.ReadCloser, error) {
+				logger.Debugw("opening proto file", "file", filename)
+				if vendorDirectory != "" {
+					if f, err := os.Open(filepath.Join(vendorDirectory, filename)); err == nil {
+						return f, nil
+					}
+				}
+
+				// if there is a buf file, there will also be a `buf.gen.yaml` at the same location, and we will
+				// assume that is the import root for all proto. Therefore, we will prepend that directory for
+				// our `os.Open` call.
+				if closestBufFile != "" {
+					importPath := filename
+
+					if !strings.HasPrefix(importPath, "/") {
+						importPath = filepath.Join(filepath.Dir(closestBufFile), filename)
+					}
+
+					logger.Debugw("opening file from path", "file_path", importPath)
+					return os.Open(importPath)
+				}
+
+				return os.Open(filename)
+			},
+		}
 
 		d, err := p.ParseFiles(currentDir)
 		if err != nil {
@@ -239,6 +300,10 @@ func updateFileBrowser(dir string, relative bool) error {
 		fileBrowser.AddItem("..", "", 0, nil)
 	}
 	for _, dirItem := range dirs {
+		if dirItem.Name() == "buf.yaml" {
+			closestBufFile = filepath.Join(currentDir, "buf.yaml")
+		}
+
 		if itemName := dirItem.Name(); dirItem.IsDir() || filepath.Ext(itemName) == ".proto" {
 			fileBrowser.AddItem(itemName, "", 0, nil)
 		}
@@ -259,30 +324,7 @@ func showProtobufForm(fqmn string) {
 	message := dynamic.NewMessage(descriptors[fqmn])
 
 	for _, field := range descriptors[fqmn].GetFields() {
-		fieldName := field.GetName()
-
-		fieldType := strings.ToLower(strings.TrimPrefix(field.GetType().String(), "TYPE_"))
-		fieldModifier := strings.ToLower(strings.TrimPrefix(field.GetLabel().String(), "LABEL_"))
-
-		f := *field
-		messageEditor.AddInputField(
-			fmt.Sprintf("%s (%s %s)", fieldName, fieldModifier, fieldType), "",
-			0,
-			nil,
-			func(text string) {
-				switch field.GetType() {
-				case descriptorpb.FieldDescriptorProto_TYPE_INT32:
-					// parse as number
-					n, _ := strconv.Atoi(text)
-					message.SetField(&f, n)
-				case descriptorpb.FieldDescriptorProto_TYPE_INT64:
-					n, _ := strconv.Atoi(text)
-					message.SetField(&f, n)
-				case descriptorpb.FieldDescriptorProto_TYPE_STRING:
-					message.SetField(&f, text)
-				}
-			},
-		)
+		form.AddInputField(messageEditor, field, "", message)
 	}
 	messageEditor.AddButton("Send", func() {
 		err := publish(event, proto2.MessageV2(message))
