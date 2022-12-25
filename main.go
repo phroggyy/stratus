@@ -326,6 +326,7 @@ func showProtobufForm(fqmn string) {
 	for _, field := range descriptors[fqmn].GetFields() {
 		form.AddInputField(messageEditor, field, "", message)
 	}
+
 	messageEditor.AddButton("Send", func() {
 		err := publish(event, proto2.MessageV2(message))
 		if err != nil {
