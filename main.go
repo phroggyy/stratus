@@ -13,19 +13,15 @@ import (
 	"github.com/gdamore/tcell/v2"
 	proto2 "github.com/golang/protobuf/proto"
 	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/rivo/tview"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
-	"gopkg.in/yaml.v3"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"stratus/pkg/form"
-	"strings"
+	"stratus/pkg/protobuf"
 )
 
 var (
@@ -82,11 +78,18 @@ func configureFileBrowser() {
 			updateFileBrowser("..", true)
 		}
 
+		// If the user hits `/` we should open the search panel and focus it
+		if event.Rune() == '/' {
+			//
+		}
+
 		return event
 	})
 
 	fileBrowser.SetSelectedFunc(func(_ int, itemName string, _ string, _ rune) {
-		if filepath.Ext(currentDir) == ".proto" {
+		// if we select an item within a .proto file, we should show the form, unless the selected item is `..`
+		// in which case we should navigate up.
+		if filepath.Ext(currentDir) == ".proto" && itemName != ".." {
 			showProtobufForm(itemName)
 			return
 		}
@@ -216,77 +219,36 @@ func updateFileBrowser(dir string, relative bool) error {
 	// if we're "inside" a proto file, we should render messages instead of directories
 	if filepath.Ext(currentDir) == ".proto" {
 		// if we have previously navigated past a `buf.yaml` file, we'll read that first and make all protos available
+		relativePathRoot := ""
 		vendorDirectory := ""
 		if closestBufFile != "" {
 			logger.Debugw("parsing buf file", "file_path", closestBufFile)
+
 			// run `buf export` for each item in `buf.yaml`
 			dir, err := os.MkdirTemp(os.TempDir(), "buf-vendor-proto")
 			if err != nil {
 				panic(err)
 			}
 			vendorDirectory = dir
-
-			bufFile, err := os.Open(closestBufFile)
+			err = protobuf.DownloadBufDependencies(closestBufFile, dir)
 			if err != nil {
-				panic(err)
+				return err
 			}
-			d := yaml.NewDecoder(bufFile)
 
-			bufContents := map[string]interface{}{}
-			if err := d.Decode(&bufContents); err != nil {
-				panic(err)
-			}
-			logger.Debugw("parsed buf file", "contents", bufContents)
-
-			if deps, ok := bufContents["deps"].([]string); ok {
-				for _, dep := range deps {
-					exec.Command("buf", "export", dep, "-o", dir).Run()
-				}
-			} else {
-				logger.Debugw("no buf dependencies declared", "file", closestBufFile)
-			}
-		}
-		// read the file
-		p := protoparse.Parser{
-			Accessor: func(filename string) (io.ReadCloser, error) {
-				logger.Debugw("opening proto file", "file", filename)
-				if vendorDirectory != "" {
-					if f, err := os.Open(filepath.Join(vendorDirectory, filename)); err == nil {
-						return f, nil
-					}
-				}
-
-				// if there is a buf file, there will also be a `buf.gen.yaml` at the same location, and we will
-				// assume that is the import root for all proto. Therefore, we will prepend that directory for
-				// our `os.Open` call.
-				if closestBufFile != "" {
-					importPath := filename
-
-					if !strings.HasPrefix(importPath, "/") {
-						importPath = filepath.Join(filepath.Dir(closestBufFile), filename)
-					}
-
-					logger.Debugw("opening file from path", "file_path", importPath)
-					return os.Open(importPath)
-				}
-
-				return os.Open(filename)
-			},
+			relativePathRoot = filepath.Dir(closestBufFile)
 		}
 
-		d, err := p.ParseFiles(currentDir)
+		d, err := protobuf.GetMessagesFromFile(currentDir, vendorDirectory, relativePathRoot)
+
 		if err != nil {
 			return err
 		}
+		descriptors = d
+
 		fileBrowser.AddItem("..", "", 0, nil)
 
-		for _, descriptor := range d {
-			for _, mdesc := range descriptor.GetMessageTypes() {
-				// fully qualified message name
-				fqmn := fmt.Sprintf("%s.%s", descriptor.GetPackage(), mdesc.GetName())
-				descriptors[fqmn] = mdesc
-				fileBrowser.AddItem(fqmn, "", 0, nil)
-			}
+		for fqmn, _ := range descriptors {
+			fileBrowser.AddItem(fqmn, "", 0, nil)
 		}
 		return nil
 	}
